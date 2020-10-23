@@ -8,7 +8,8 @@ const IMAGENET_CLASSES = {
 let model;
 document.getElementById("predict-button").addEventListener("click",clickProdict);
 (async function () {
-    model = await tf.loadLayersModel("model/model.json");
+	//model = await tf.loadLayersModel("model/model.json");
+	model = await tf.loadGraphModel("model/model.json");
     $(".progress-bar").hide();
 })();
 

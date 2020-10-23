@@ -8,6 +8,9 @@ from tensorflow.keras.layers import Dense
 from tensorflow.keras.layers import Input
 from tensorflow.keras.models import Model
 from tensorflow.keras.optimizers import Adam
+
+from keras.callbacks import EarlyStopping, ReduceLROnPlateau
+
 from tensorflow.keras.utils import to_categorical
 from sklearn.preprocessing import LabelBinarizer
 from sklearn.model_selection import train_test_split
@@ -15,7 +18,9 @@ from sklearn.metrics import classification_report
 from sklearn.metrics import confusion_matrix
 from imutils import paths
 import matplotlib.pyplot as plt
+import tensorflowjs as tfjs
 import numpy as np
+import pandas as pd
 
 import cv2
 import os
@@ -24,8 +29,6 @@ INIT_LR = 1e-3
 EPOCHS = 25
 BS = 8
 
-# grab the list of images in our dataset directory, then initialize
-# the list of data (i.e., images) and class images
 print("[INFO] loading images...")
 imagePaths = list(paths.list_images("./dataset2"))
 data = []
@@ -35,20 +38,13 @@ labels = []
 for imagePath in imagePaths:
 	# extract the class label from the filename
 	label = imagePath.split(os.path.sep)[-2]
-
-
-	# load the image, swap color channels, and resize it to be a fixed
-	# 224x224 pixels while ignoring aspect ratio
 	image = cv2.imread(imagePath)
 	image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
 	image = cv2.resize(image, (224, 224))
 
-	# update the data and labels lists, respectively
 	data.append(image)
 	labels.append(label)
 
-# convert the data and labels to NumPy arrays while scaling the pixel
-# intensities to the range [0, 255]
 data = np.array(data) / 255.0
 labels = np.array(labels)
 
@@ -57,68 +53,54 @@ lb = LabelBinarizer()
 labels = lb.fit_transform(labels)
 labels = to_categorical(labels)
 
-# partition the data into training and testing splits using 80% of
-# the data for training and the remaining 20% for testing
 (trainX, testX, trainY, testY) = train_test_split(data, labels,
 	test_size=0.20, stratify=labels, random_state=42)
 
 # initialize the training data augmentation object
-trainAug = ImageDataGenerator(
-	rotation_range=15,
-	fill_mode="nearest")
+trainAug = ImageDataGenerator(rotation_range=15,fill_mode="nearest")
 
-# load the DenseNet121 network, ensuring the head FC layer sets are left
-# off
-baseModel = DenseNet121(weights="imagenet", include_top=False,
-	input_tensor=Input(shape=(224, 224, 3)))
+baseModel = DenseNet121(weights="imagenet", include_top=False,input_tensor=Input(shape=(224, 224, 3)))
 
-# construct the head of the model that will be placed on top of the
-# the base model
 headModel = baseModel.output
-headModel = AveragePooling2D(pool_size=(4, 4))(headModel)
+headModel = AveragePooling2D(pool_size=(3, 3))(headModel)
 headModel = Flatten(name="flatten")(headModel)
 headModel = Dense(64, activation="relu")(headModel)
 headModel = Dropout(0.5)(headModel)
 headModel = Dense(2, activation="softmax")(headModel)
 
-# place the head FC model on top of the base model (this will become
-# the actual model we will train)
+
 model = Model(inputs=baseModel.input, outputs=headModel)
 
-# loop over all layers in the base model and freeze them so they will
-# *not* be updated during the first training process
 for layer in baseModel.layers:
 	layer.trainable = False
-
-# compile our model
 
 opt = Adam(lr=INIT_LR, decay=INIT_LR / EPOCHS)
 model.compile(loss="binary_crossentropy", optimizer=opt,
 	metrics=["accuracy"])
 
-# train the head of the network
-print("[INFO] training head...")
-H = model.fit_generator(
-	trainAug.flow(trainX, trainY, batch_size=BS),
-	steps_per_epoch=len(trainX) // BS,
-	validation_data=(testX, testY),
-	validation_steps=len(testX) // BS,
-	epochs=EPOCHS)
+earlystop = EarlyStopping(patience=10)
+learning_rate_reduction = ReduceLROnPlateau(monitor='val_loss', 
+                                            patience=2, 
+                                            verbose=1, 
+                                            factor=0.5, 
+                                            min_lr=0.00001)
 
-# make predictions on the testing set
-print("[INFO] evaluating network...")
+
+
+callbacks = [earlystop, learning_rate_reduction]
+
+
+H=model.fit(trainAug.flow(trainX, trainY, batch_size=BS),steps_per_epoch = trainX.shape[0] // BS,epochs=EPOCHS, verbose=1 ,validation_data=trainAug.flow(testX, testY, batch_size=BS),validation_steps=len(testX) // BS,callbacks=callbacks)
+
+
+tfjs.converters.save_keras_model(model, "covidClient/model")
+
 predIdxs = model.predict(testX, batch_size=BS)
-
-# for each image in the testing set we need to find the index of the
-# label with corresponding largest predicted probability
 predIdxs = np.argmax(predIdxs, axis=1)
 
 # show a nicely formatted classification report
-print(classification_report(testY.argmax(axis=1), predIdxs,
-	target_names=lb.classes_))
+print(classification_report(testY.argmax(axis=1), predIdxs,target_names=lb.classes_))
 
-# compute the confusion matrix and and use it to derive the raw
-# accuracy, sensitivity, and specificity
 cm = confusion_matrix(testY.argmax(axis=1), predIdxs)
 total = sum(sum(cm))
 acc = (cm[0, 0] + cm[1, 1]) / total
@@ -131,20 +113,26 @@ print("acc: {:.4f}".format(acc))
 print("sensitivity: {:.4f}".format(sensitivity))
 print("specificity: {:.4f}".format(specificity))
 
-# plot the training loss and accuracy
-N = EPOCHS
-plt.style.use("ggplot")
-plt.figure()
-plt.plot(np.arange(0, N), H.history["loss"], label="train_loss")
-plt.plot(np.arange(0, N), H.history["val_loss"], label="val_loss")
-plt.plot(np.arange(0, N), H.history["accuracy"], label="train_acc")
-plt.plot(np.arange(0, N), H.history["val_accuracy"], label="val_acc")
-plt.title("Training Loss and Accuracy on COVID-19 Dataset")
-plt.xlabel("Epoch #")
-plt.ylabel("Loss/Accuracy")
-plt.legend(loc="lower left")
-plt.savefig("plot.png")
+# model_loss = pd.DataFrame(H.history)
+# model_loss[['accuracy','val_accuracy']].plot()
+# plt.show()
+
+# model_loss[['loss','val_loss']].plot()
+# plt.show()
+
+
+
+fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 12))
+ax1.plot(H.history['loss'], color='b', label="Training loss")
+ax1.plot(H.history['val_loss'], color='r', label="validation loss")
+ax1.set_xticks(np.arange(1, EPOCHS, 1))
+ax1.set_yticks(np.arange(0, 1, 0.1))
+
+ax2.plot(H.history['accuracy'], color='b', label="Training accuracy")
+ax2.plot(H.history['val_accuracy'], color='r',label="Validation accuracy")
+ax2.set_xticks(np.arange(1, EPOCHS, 1))
+
+legend = plt.legend(loc='best', shadow=True)
+plt.tight_layout()
 plt.show()
-# serialize the model to disk
-print("[INFO] saving  model...")
-model.save('DenseNet121.m5', save_format="h5")
+
